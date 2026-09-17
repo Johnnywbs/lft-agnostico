@@ -44,8 +44,7 @@ def cleanup() -> None:
     backend = get_backend()
     print("\n[CLEANUP] Removing old SSH key for ONOS...")
     subprocess.run('ssh-keygen -R "[172.17.0.2]:8101" >/dev/null 2>&1', shell=True)
-    print("[CLEANUP] Stopping and removing all Docker containers...")
-    print("[CLEANUP] Removing unused Docker networks...")
+    print(f"[CLEANUP] Removing all LFT nodes ({backend.__class__.__name__})...")
     backend.cleanup()
     print("[CLEANUP] Done.")
 

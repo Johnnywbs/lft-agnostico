@@ -1,4 +1,4 @@
-FROM golang:1.23 AS builder
+FROM golang:1.25 AS builder
 WORKDIR /src
 RUN apt-get update && \
     apt-get install -y --no-install-recommends git && \

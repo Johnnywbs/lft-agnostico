@@ -1,4 +1,3 @@
-import subprocess
 import logging
 from profissa_lft.host import Host
 from profissa_lft.exceptions import NodeInstantiationFailed
@@ -22,8 +21,4 @@ class IperfServer(Host):
     
     def startServer(self, port: int = 5201) -> None:
         # Starts iperf3 server in background inside the container
-        cmd = (
-            f"docker exec -d {self.getNodeName()} "
-            f"bash -lc \"iperf3 -s -p {port}\""
-        )
-        subprocess.run(cmd, shell=True, check=True)
+        self.getBackend().exec_detached(self.getNodeName(), f"bash -lc \"iperf3 -s -p {port}\"")

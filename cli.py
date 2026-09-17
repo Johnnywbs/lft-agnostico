@@ -10,6 +10,8 @@ from pathlib import Path
 
 import click
 
+from profissa_lft.env import get_backend
+
 ROOT = Path(__file__).resolve().parent
 
 RUNNABLE = {
@@ -22,14 +24,9 @@ TRAFFIC_TYPES = ("ping", "iperf", "ffmpeg")
 
 # helpers
 
-def docker_cleanup():
-    ids = subprocess.run(["docker", "ps", "-q"], capture_output=True, text=True).stdout.strip()
-    if ids:
-        containers = ids.splitlines()
-        subprocess.run(["docker", "rm", "-f"] + containers)
-        click.echo(f"*** removed {len(containers)} container(s)")
-    else:
-        click.echo("*** no containers running")
+def cleanup_nodes():
+    get_backend().cleanup()
+    click.echo("*** cleanup done")
 
 
 def discover_experiments():
@@ -80,7 +77,7 @@ def _run_repl(topo):
         if not line:
             continue
         if line in ("quit", "exit"):
-            docker_cleanup()
+            cleanup_nodes()
             break
         if line in ("help", "?"):
             click.echo(REPL_HELP)
@@ -121,9 +118,9 @@ def _run_repl(topo):
                 click.echo(f"*** iperf {n1} -> {n2} ({ip2})")
                 node2 = topo.clients.get(n2) or topo.servers.get(n2)
                 node2.startServer(port=5201)
-                subprocess.run(["docker", "exec", n1, "iperf3", "-c", ip2, "-p", "5201", "-t", "10"])
+                subprocess.run(get_backend().exec_argv(n1) + ["iperf3", "-c", ip2, "-p", "5201", "-t", "10"])
             elif ttype == "ping":
-                subprocess.run(["docker", "exec", n1, "ping", "-c", "4", ip2])
+                subprocess.run(get_backend().exec_argv(n1) + ["ping", "-c", "4", ip2])
             else:
                 click.echo(f"unknown traffic type: {ttype}")
 
@@ -161,10 +158,10 @@ def experiment(name):
         return
     if name not in experiments:
         raise SystemExit(f"experiment not found: {name}")
-    docker_cleanup()
+    cleanup_nodes()
     script = ROOT / experiments[name]
     result = subprocess.run(["python3", str(script)], cwd=script.parent)
-    docker_cleanup()
+    cleanup_nodes()
     sys.exit(result.returncode)
 
 
@@ -182,7 +179,7 @@ def topology_create(manual, path):
     from onos_topologies.dash_topology.dash_topology import DashTopology
 
     if manual:
-        docker_cleanup()
+        cleanup_nodes()
         topo = DashTopology(config={
             "pops": (), "adjacency_matrix": (),
             "apply_link_properties": False, "randomize_link_properties": False,
@@ -193,7 +190,7 @@ def topology_create(manual, path):
         print(f"*** ONOS ready - IP: {topo.onos_ip}", flush=True)
         _run_repl(topo)
     elif path:
-        docker_cleanup()
+        cleanup_nodes()
         config = _load_config(Path(path))
         topo = DashTopology(config=config)
         topo.run(run_discovery=True, disable_fwd=False)
@@ -209,8 +206,8 @@ def utils():
 
 @utils.command("clean")
 def utils_clean():
-    """Remove all running Docker containers"""
-    docker_cleanup()
+    """Remove all running LFT nodes (Docker containers or K3s pods)"""
+    cleanup_nodes()
 
 
 main = cli

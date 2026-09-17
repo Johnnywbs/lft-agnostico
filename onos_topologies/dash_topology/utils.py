@@ -13,6 +13,7 @@ from requests.auth import HTTPBasicAuth
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional, Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from profissa_lft.env import get_backend
 
 PCAP_FIELDS: List[str] = [
     "frame.time_epoch",
@@ -34,18 +35,18 @@ PCAP_FIELDS: List[str] = [
 
 # Brief: Retrieves the IP address of a Docker container by its name
 def get_container_ip(name: str) -> str:
-    cmd = f"docker inspect -f '{{{{range .NetworkSettings.Networks}}}}{{{{.IPAddress}}}}{{{{end}}}}' {name}"
-    return subprocess.check_output(cmd, shell=True, text=True).strip()
+    backend = get_backend()
+    return backend.node_ip(name)
 
 
 # Brief: Stops and removes all Docker containers and purges unused networks
 def cleanup() -> None:
+    backend = get_backend()
     print("\n[CLEANUP] Removing old SSH key for ONOS...")
     subprocess.run('ssh-keygen -R "[172.17.0.2]:8101" >/dev/null 2>&1', shell=True)
     print("[CLEANUP] Stopping and removing all Docker containers...")
-    subprocess.run('sudo docker rm -f $(sudo docker ps -aq) >/dev/null 2>&1 || true', shell=True)
     print("[CLEANUP] Removing unused Docker networks...")
-    subprocess.run('sudo docker network prune -f >/dev/null 2>&1', shell=True)
+    backend.cleanup()
     print("[CLEANUP] Done.")
 
 
@@ -95,6 +96,7 @@ def snapshot_ovs_state(
     snapshot_idx: Optional[int] = None,
     parse_csv: bool = True,  # keeps compatibility with your caller
 ) -> None:
+    backend = get_backend()
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
@@ -115,11 +117,11 @@ def snapshot_ovs_state(
             ports_writer.writeheader()
 
         def snap_one(sw: str) -> None:
-            rc, flows_txt, err = _run(["docker", "exec", sw, "ovs-ofctl", "-O", of_version, "dump-flows", sw])
+            rc, flows_txt, err = _run(backend.exec_argv(sw) + ["ovs-ofctl", "-O", of_version, "dump-flows", sw])
             if err:
                 flows_txt += "\n" + err
 
-            rc, ports_txt, err = _run(["docker", "exec", sw, "ovs-ofctl", "-O", of_version, "dump-ports", sw])
+            rc, ports_txt, err = _run(backend.exec_argv(sw) + ["ovs-ofctl", "-O", of_version, "dump-ports", sw])
             if err:
                 ports_txt += "\n" + err
 

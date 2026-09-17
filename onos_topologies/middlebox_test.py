@@ -1,9 +1,11 @@
 import subprocess
 
 from profissa_lft.host import Host
+from profissa_lft.env import get_backend
 from switch_modified import Switch
 from profissa_lft.controller import Controller
 from onos import ONOS
+from onos_topologies.dash_topology.utils import get_container_ip
 import paramiko
 
 from os import getcwd
@@ -38,7 +40,7 @@ def createController(name: str):
     if name == "c1": mapports = True
     nodes[name].instantiate(mapPorts=mapports)
     print(" ... Creating config folder")
-    subprocess.call(f"docker exec {name} mkdir /root/onos/config", shell=True)
+    subprocess.call(f"{get_backend().exec_prefix(name)} mkdir /root/onos/config", shell=True)
     print(f" ... Controller {name} created successfully")
 
 def signal_handler(sig, frame):
@@ -64,11 +66,12 @@ try:
     while(inp != 'y'):
         inp = input(" Proceed to switch creation? [y]")
 
-    nodes["c1"].activateONOSApps("172.17.0.2")
+    onos_ip = get_container_ip("c1")
+    nodes["c1"].activateONOSApps(onos_ip)
     createSwitch()
     print("[Experiment] Setting controller for the s1 and s2")
-    s1.setController("172.17.0.2", 6653) # Onos container's IP (can be obtained with docker container inspect) and default port for OpenFlow
-    s2.setController("172.17.0.2", 6653)
+    s1.setController(onos_ip, 6653) # Onos container's IP (can be obtained with docker container inspect) and default port for OpenFlow
+    s2.setController(onos_ip, 6653)
 
     print(["[Experiment] Creating Hosts"])
     print(" ... Instantiating h1")
@@ -98,8 +101,9 @@ try:
     s2.addRoute("192.168.0.0", 24, "s2s1")
 
     print("[Experiment] Generating simple traffic for host detection")
-    subprocess.run(f"docker exec h1 ping 192.168.0.2 -c 2", shell=True)
-    subprocess.run(f"docker exec h3 ping 192.168.1.4 -c 2", shell=True)
+    backend = get_backend()
+    subprocess.run(f"{backend.exec_prefix('h1')} ping 192.168.0.2 -c 2", shell=True)
+    subprocess.run(f"{backend.exec_prefix('h3')} ping 192.168.1.4 -c 2", shell=True)
 
 except Exception as e:
     [node.delete() for _,node in nodes.items()]

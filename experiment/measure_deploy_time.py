@@ -7,6 +7,7 @@ from subprocess import run
 from threading import Thread
 from os.path import isfile
 from experiment.constants import *
+from profissa_lft.env import get_backend
 
 
 def barPlot(dataframe, title):
@@ -17,7 +18,15 @@ def barPlot(dataframe, title):
     plt.show()
 
 
-def cleanupContainers():
+def cleanupLftNodes():
+    # LFT's own nodes: agnostic, goes through whichever backend is selected
+    # (LFT_BACKEND=docker|k3s).
+    get_backend().cleanup()
+
+
+def cleanupMininetContainers():
+    # Mininet-WiFi is the comparison baseline, Docker-only, has nothing to do
+    # with profissa_lft's backend -- stays a raw docker cleanup on purpose.
     out = run('docker ps -qa', shell=True, capture_output=True)
     containerIds = out.stdout.decode().split()
     [run(f'docker rm -f {id}', shell=True) for id in containerIds]
@@ -53,7 +62,8 @@ def getCurrentMemoryUsage():
 replicas = 30
 sizes = [1, 4, 16, 64, 256]
 coolDownTime = 20
-cleanupContainers()
+cleanupLftNodes()
+cleanupMininetContainers()
 
 
 # Measure deployment and Undeployment time of LFT
@@ -82,7 +92,7 @@ for i in range(replicas):
         except Exception as ex:
             print(f"Caught an exception. {ex}")
             dlft.getReferences(sizes)
-            cleanupContainers()
+            cleanupLftNodes()
             continue
     print(f'LFT Deployment times for replica {i+1} were {lftDeployTime}')
     print(f'LFT Undeployment times for replica {i+1} were {lftUndeployTime}')
@@ -90,7 +100,7 @@ for i in range(replicas):
     undeployLftDf.loc[i] = lftUndeployTime
 
 
-cleanupContainers()
+cleanupLftNodes()
 saveFile(deployLftDf, f'{RESULTS_PATH}deployLftTime.csv')
 saveFile(undeployLftDf, f'{RESULTS_PATH}undeployLftTime.csv')
 #barPlot(deployLftDf, "LFT deployment time")
@@ -126,13 +136,13 @@ for i in range(replicas):
         except Exception as ex:
             print(f"Caught an exception. {ex}")
             dlft.getReferences(sizes)
-            cleanupContainers()
+            cleanupLftNodes()
             continue
     print(f'LFT Deployment Memory Consumption for replica {i+1} were {lftDeployMem}')
     deployMemLftDf.loc[i] = lftDeployMem
 
 
-cleanupContainers()
+cleanupLftNodes()
 saveFile(deployMemLftDf, f'{RESULTS_PATH}deployLftMem.csv')
 
 
@@ -160,7 +170,7 @@ for i in range(replicas):
             sleep(coolDownTime)
         except Exception as ex:
             print(f"Caught an exception. {ex}")
-            cleanupContainers()
+            cleanupMininetContainers()
             continue
     print(f'Mininet Containernet Deployment times for replica {i+1} were {mnDeployTime}')
     print(f'Mininet Containernet Undeployment times for replica {i+1} were {mnUndeployTime}')
@@ -168,7 +178,7 @@ for i in range(replicas):
     undeployMnDf.loc[i] = mnUndeployTime
 
 
-cleanupContainers()
+cleanupMininetContainers()
 saveFile(deployMnDf, f'{RESULTS_PATH}deployMnTime.csv')
 saveFile(undeployMnDf, f'{RESULTS_PATH}undeployMnTime.csv')
 #barPlot(deployMnDf, "ContainerNet deployment time")
@@ -202,11 +212,11 @@ for i in range(replicas):
             sleep(coolDownTime)
         except Exception as ex:
             print(f"Caught an exception. {ex}")
-            cleanupContainers()
+            cleanupMininetContainers()
             continue
     print(f'Mininet-WiFi Deployment Memory Consumption for replica {i+1} were {mnDeployMem}')
     deployMemMnDf.loc[i] = mnDeployMem
 
 
-cleanupContainers()
+cleanupMininetContainers()
 saveFile(deployMemMnDf, f'{RESULTS_PATH}deployMnMem.csv')

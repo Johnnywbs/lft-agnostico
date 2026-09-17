@@ -21,6 +21,7 @@ from configparser import ConfigParser
 import json
 from .exceptions import *
 from .constants import *
+from . import env
 
 
 # Just to enable the declaration of Type in methods
@@ -40,9 +41,17 @@ class Node:
         self.__nodeName = nodeName
         self.memory = ''
         self.cpu = ''
+        self.__backend = env.get_backend()
 
     def __createTmpFolder(self) -> None:
         subprocess.run("mkdir -p /tmp/lft/", shell=True)
+
+    # Brief: Returns the infra backend (Docker, K3s, ...) this node was created with
+    # Params:
+    # Return:
+    #   InfraBackend instance
+    def getBackend(self):
+        return self.__backend
 
     # OBS: Create nodes with short name lenght due to a restriction on a iproute2 to define and create interfaces.
     # Brief: Instantiate the container
@@ -54,93 +63,17 @@ class Node:
     # Return:
     #   None
     def instantiate(self, dockerImage="alexandremitsurukaihara/lst2.0:host", dockerCommand='', dns='8.8.8.8', memory='', cpus='', runCommand='') -> None:
-        command = []
-        
-        def addDockerRun():
-            command.append(DOCKER_RUN)
-
-        def addRunOptions():
-            command.append("-d")
-
-        def addNetwork():
-            command.append(NETWORK + "=none")
-
-        def addContainerName():
-            command.append(NAME + '=' + self.getNodeName())
-
-        def addPrivileged():
-            command.append(PRIVILEGED)
-
-        def addDNS(dns):
-            command.append(DNS + '=' + dns)
-
-        def addContainerMemory(memory):
-            if memory != '': 
-                command.append(MEMORY + '=' + memory)
-
-        def addContainerCPUs(cpus):
-            if cpus != '': 
-                command.append(CPUS + '=' + cpus)
-
-        def addContainerImage(image):
-            command.append(image)
-
-        def addRunCommand(runCommand):
-            command.append(runCommand)
-
-        def buildCommand():
-            return " ".join(command)
-
-        if not self.__imageExists(dockerImage):
-            logging.info(f"Image {dockerImage} not found, pulling from remote repository...")
-            self.__pullImage(dockerImage)
-        
-        if dockerCommand == '':
-            addDockerRun()
-            addRunOptions()
-            addNetwork()
-            addContainerName()
-            addPrivileged()
-            addDNS(dns)
-            addContainerMemory(memory)
-            addContainerCPUs(cpus)
-            addContainerImage(dockerImage)
-            addRunCommand(runCommand)
-    
-        try:    
-            if dockerCommand != '':
-                subprocess.run(dockerCommand, shell=True, capture_output=True)            
-            else:
-                subprocess.run(buildCommand(), shell=True, capture_output=True)
-        except Exception as ex:
-            logging.error(f"Error while criating the container {self.getNodeName()}: {str(ex)}")
-            raise NodeInstantiationFailed(f"Error while criating the container {self.getNodeName()}: {str(ex)}")
-        
-        self.__enableNamespace(self.getNodeName())
-
-    # Brief: Verifies if the image exists
-    # Params:
-    #   String image: Tag of the Docker image 
-    # Return:
-    #   True if the image exists locally
-    def __imageExists(self, image: str) -> bool:
-        out = subprocess.run(f"docker inspect --type=image {image}", shell=True, capture_output=True)
-        outJson = json.loads(out.stdout.decode('utf-8'))
-        if outJson == []: return False
-        else: return True
-
-            
-    # Brief: Pulls the image from a Docker Hub repository
-    # Params:
-    #   String image: Tag of the Docker image 
-    # Return:
-    #   True if the image exists locally
-    def __pullImage(self, image):
-        try: 
-            subprocess.run(f"docker pull {image}", shell=True)
-        except Exception as ex:
-            logging.error(f"Error pulling non-existing {image} image: {str(ex)}")
-            raise NodeInstantiationFailed(f"Error pulling non-existing {image} image: {str(ex)}")
+        self.__backend.create_node(
+            self.getNodeName(),
+            image=dockerImage,
+            dockerCommand=dockerCommand,
+            dns=dns,
+            memory=memory,
+            cpus=cpus,
+            runCommand=runCommand,
+        )
+        self.__backend.enable_namespace(self.getNodeName())
+        env.mark_node_instantiated()
 
     # Brief: Instantiate the container
     # Params:
@@ -149,11 +82,7 @@ class Node:
     # Return:
     #   None
     def delete(self) -> None:
-        try:    
-            subprocess.run(f"docker kill {self.getNodeName()} && docker rm {self.getNodeName()}", shell=True, capture_output=True)
-        except Exception as ex:
-            logging.error(f"Error while deleting the host {self.getNodeName()}: {str(ex)}")
-            raise NodeInstantiationFailed(f"Error while deleting the host {self.getNodeName()}: {str(ex)}")
+        self.__backend.delete_node(self.getNodeName())
 
     # Brief: Set Ip to an interface (the ip must be set only after connecting it to a container)
     # Params:
@@ -240,7 +169,7 @@ class Node:
             logging.error(f"Network interface {interfaceName} does not exist")
             raise Exception(f"Network interface {interfaceName} does not exist")
         try:
-            subprocess.run(f"docker exec {self.getNodeName()} ip route add {ip}/{mask} dev {interfaceName}", shell=True)
+            subprocess.run(f"{self.__backend.exec_prefix(self.getNodeName())} ip route add {ip}/{mask} dev {interfaceName}", shell=True)
         except Exception as ex:
             logging.error(f"Error adding route {ip}/{mask} via {interfaceName} in {self.getNodeName()}: {str(ex)}")
             raise Exception(f"Error adding route {ip}/{mask} via {interfaceName} in {self.getNodeName()}: {str(ex)}")
@@ -259,6 +188,49 @@ class Node:
             logging.error(f"Error adding route {ip}/{mask} via {interfaceName} in {self.getNodeName()}: {str(ex)}")
             raise Exception(f"Error adding route {ip}/{mask} via {interfaceName} in {self.getNodeName()}: {str(ex)}")
 
+    # Brief: Set the default route in the node, manipulating its network
+    # namespace directly from the host (like __setIp) instead of running "ip"
+    # inside the container. Some images (e.g. neubot/dash's minimal server
+    # image) ship no shell/ip binary at all, so a docker-exec-based "ip route"
+    # would fail with "command not found" regardless of capabilities.
+    # Params:
+    #   String gatewayIp: Gateway to route through
+    #   String interfaceName: This node's interface facing the gateway
+    # Return:
+    #   None
+    def setDefaultRoute(self, gatewayIp: str, interfaceName: str) -> None:
+        try:
+            subprocess.run(
+                f"ip -n {self.getNodeName()} route add default via {gatewayIp} dev {interfaceName} onlink",
+                shell=True, check=True, capture_output=True, text=True,
+            )
+        except subprocess.CalledProcessError as ex:
+            logging.error(f"Error setting default route via {gatewayIp} on {self.getNodeName()}: {ex.stderr.strip()}")
+            raise Exception(f"Error setting default route via {gatewayIp} on {self.getNodeName()}: {ex.stderr.strip()}")
+
+    # Brief: Send a best-effort ping from this node's network namespace using
+    # the host's own ping binary (via "ip netns exec"), instead of running
+    # ping inside the container - some images (e.g. neubot/dash's minimal
+    # server image) have no shell or ping binary at all. A ping going
+    # unanswered (e.g. priming ARP for a non-attributed IP) is expected and
+    # is not an error; this only raises if the underlying mechanism itself
+    # fails (e.g. the namespace doesn't exist).
+    # Params:
+    #   String targetIp: IP address to ping
+    #   int timeoutSeconds: Per-request timeout
+    # Return:
+    #   bool: True if a reply was received, False otherwise
+    def pingFromHost(self, targetIp: str, timeoutSeconds: int = 2) -> bool:
+        result = subprocess.run(
+            f"ip netns exec {self.getNodeName()} ping -c 1 -W {timeoutSeconds} {targetIp}",
+            shell=True, capture_output=True, text=True,
+        )
+        if result.returncode not in (0, 1):
+            # 0 = reply received, 1 = no reply (both fine here) - anything
+            # else means the mechanism itself broke (bad namespace, etc.)
+            logging.error(f"Error pinging {targetIp} from {self.getNodeName()}: {result.stderr.strip()}")
+            raise Exception(f"Error pinging {targetIp} from {self.getNodeName()}: {result.stderr.strip()}")
+        return result.returncode == 0
 
     # Brief: Set Ip to an interface (the ip must be set only after connecting it to a container, because)
     # Params:
@@ -273,7 +245,7 @@ class Node:
         
         self.addRoute(destinationIp, 32, interfaceName)
         try:
-            subprocess.run(f"docker exec {self.getNodeName()} route add default gw {destinationIp} dev {interfaceName}", shell=True)
+            subprocess.run(f"{self.__backend.exec_prefix(self.getNodeName())} route add default gw {destinationIp} dev {interfaceName}", shell=True)
         except Exception as ex:
             logging.error(f"Error while setting gateway {destinationIp} on device {interfaceName} in {self.getNodeName()}: {str(ex)}")
             raise Exception(f"Error while setting gateway {destinationIp} on device {interfaceName} in {self.getNodeName()}: {str(ex)}")
@@ -281,17 +253,32 @@ class Node:
     # Brief: Runs a command inside the container
     # Params:
     #   String command: String containing the command to run inside the container
+    #   bool background: If True, don't wait for the command to finish (for a
+    #     process meant to keep running until stopped separately, e.g. srsenb).
+    #     Errors from a backgrounded command are NOT detected - by design,
+    #     there's nothing to wait for.
     # Return:
-    #   Returns variable that contains stdout and stderr (more information in subprocess documentation)
-    def run(self, command: str) -> str:
-        try:
-            command = command.replace('\"', 'DOUBLEQUOTESDELIMITER')
-            command = f"docker exec {self.getNodeName()} bash -c \"" + command + f"\""
-            command = command.replace('DOUBLEQUOTESDELIMITER','\\"')
-            return subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, text=True)
-        except Exception as ex:
-            logging.error(f"Error executing command {command} in {self.getNodeName()}: {str(ex)}")
-            raise Exception(f"Error executing command {command} in {self.getNodeName()}: {str(ex)}")
+    #   subprocess.CompletedProcess (background=False) with .stdout/.stderr as
+    #   strings, or subprocess.Popen (background=True) if you need to track
+    #   the process itself.
+    def run(self, command: str, background: bool = False):
+        fullCommand = command.replace('\"', 'DOUBLEQUOTESDELIMITER')
+        fullCommand = f"{self.__backend.exec_prefix(self.getNodeName())} bash -c \"" + fullCommand + f"\""
+        fullCommand = fullCommand.replace('DOUBLEQUOTESDELIMITER','\\"')
+
+        if background:
+            try:
+                return subprocess.Popen(fullCommand, shell=True, stdout=subprocess.PIPE, text=True)
+            except Exception as ex:
+                logging.error(f"Error executing command {command} in {self.getNodeName()}: {str(ex)}")
+                raise Exception(f"Error executing command {command} in {self.getNodeName()}: {str(ex)}")
+
+        result = subprocess.run(fullCommand, shell=True, capture_output=True, text=True)
+        if result.returncode != 0:
+            msg = f"Command failed in {self.getNodeName()} (exit {result.returncode}): {command}\n{result.stderr.strip()}"
+            logging.error(msg)
+            raise Exception(msg)
+        return result
 
     # Brief: Runs multiple commands inside the container
     # Params:
@@ -307,11 +294,7 @@ class Node:
     #   String destPath: Absolute path to copy the file to the container (path+filename)
     # Return:
     def copyLocalToContainer(self, path: str, destPath: str) -> None:
-        try:
-            subprocess.run(f"docker cp {path} {self.getNodeName()}:{destPath}", shell=True, capture_output=True)
-        except Exception as ex:
-            logging.error(f"Error copying file from {path} to {destPath}: {str(ex)}")
-            raise Exception(f"Error copying file from {path} to {destPath}: {str(ex)}")
+        self.__backend.copy_to_node(self.getNodeName(), path, destPath)
 
     # Brief: Copy local file into container
     # Params:
@@ -319,14 +302,10 @@ class Node:
     #   String destPath: Absolute or relative path to copy to local (path+filename)
     # Return:
     def copyContainerToLocal(self, path: str, destPath: str) -> None:
-        try:
-            subprocess.run(f"docker cp {self.getNodeName()}:{path} {destPath}", shell=True, capture_output=True)
-        except Exception as ex:
-            logging.error(f"Error copying file from {path} to {destPath}: {str(ex)}")
-            raise Exception(f"Error copying file from {path} to {destPath}: {str(ex)}")
+        self.__backend.copy_from_node(self.getNodeName(), path, destPath)
 
     def __interfaceExists(self, interfaceName: str) -> bool:
-        out = subprocess.run(f"docker exec {self.getNodeName()} ip link | grep {interfaceName}", shell=True, capture_output=True)
+        out = subprocess.run(f"{self.__backend.exec_prefix(self.getNodeName())} ip link | grep {interfaceName}", shell=True, capture_output=True)
         if out.stdout.decode("utf8") != '':
             return True
         return False
@@ -388,23 +367,12 @@ class Node:
             logging.error(f"Error while setting virtual interfaces {peerName} to {nodeName}: {str(ex)}")
             raise Exception(f"Error while setting virtual interfaces {peerName} to {nodeName}: {str(ex)}")
 
-    # Brief: Enable accessing the Docker node namespace directly
-    # Params:
-    # Return:
-    #   None
-    def __enableNamespace(self, nodeName) -> None:
-        try:    
-            subprocess.run(f"pid=$(docker inspect -f '{{{{.State.Pid}}}}' {nodeName}); mkdir -p /var/run/netns/; ln -sfT /proc/$pid/ns/net /var/run/netns/{nodeName}", shell=True)
-        except Exception as ex:
-            logging.error(f"Error while deleting the host {self.getNodeName()}: {str(ex)}")
-            raise Exception(f"Error while deleting the host {self.getNodeName()}: {str(ex)}")
-
     # Brief: Get all interfaces names
     # Params:
     # Return:
     #   Return a list with the name of all interfaces
     def __getAllInterfaces(self) -> list:
-        output = subprocess.run(f"docker exec {self.getNodeName()} ifconfig -a | sed 's/[ \t].*//;/^$/d'", shell=True, capture_output=True)
+        output = subprocess.run(f"{self.__backend.exec_prefix(self.getNodeName())} ifconfig -a | sed 's/[ \t].*//;/^$/d'", shell=True, capture_output=True)
         interfaces=output.stdout.decode('utf8').replace(":", '').split('\n')
         return list(filter(None, interfaces)) # Remove empty strings
 
@@ -413,8 +381,7 @@ class Node:
     # Return:
     #   Return true if it is active or false otherwise
     def __isActive(self) -> bool:
-        if subprocess.run(f"docker ps | grep {self.getNodeName()}'", shell=True, capture_output=True).stdout.decode('utf8') != '': return True
-        return False
+        return self.__backend.node_exists(self.getNodeName())
 
     def setMtuSize(self, interfaceName: str, mtu: int) -> None:
         self.run(f"ifconfig {interfaceName} mtu {str(mtu)}")
@@ -445,7 +412,7 @@ class Node:
     
     def setHost(self, ip: str) -> None:
         result = self.run(f"hostname")
-        hostname = result.stdout.read().replace("\n", "")
+        hostname = result.stdout.strip()
         self.run(f"HOSTNAME=$(hostname) && echo \"{ip} {hostname}\" >> /etc/hosts")
 
     def acceptPacketsFromInterface(self, interfaceName: str):

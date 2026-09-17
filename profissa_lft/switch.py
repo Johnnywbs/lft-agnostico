@@ -16,6 +16,7 @@
 
 import logging
 import subprocess
+import time
 from .node import Node
 from .exceptions import NodeInstantiationFailed
 
@@ -44,16 +45,37 @@ class Switch(Node):
         mount = ''
         if self.__mount: mount = f'-v {self.__hostPath}:{self.__containerPath}'
         super().instantiate(dockerCommand=f"docker run -d --network=none --privileged {mount} --name={self.getNodeName()} {image}")
+        backend = self.getBackend()
+        self.__waitForOvsdb()
         try:
             # Create bridge and set it up
-            subprocess.run(f"docker exec {self.getNodeName()} ovs-vsctl add-br {self.getNodeName()}", shell=True)
-            subprocess.run(f"docker exec {self.getNodeName()} ip link set {self.getNodeName()} up", shell=True)
+            subprocess.run(f"{backend.exec_prefix(self.getNodeName())} ovs-vsctl add-br {self.getNodeName()}", shell=True)
+            subprocess.run(f"{backend.exec_prefix(self.getNodeName())} ip link set {self.getNodeName()} up", shell=True)
         except Exception as ex:
             logging.error(f"Error while creating the switch {self.getNodeName()}: {str(ex)}")
             raise NodeInstantiationFailed(f"Error while creating the switch {self.getNodeName()}: {str(ex)}")
         # Link it to a controller
         if controllerIP != '' and controllerPort != -1:
             self.setController(controllerIP, controllerPort)
+
+    # Brief: Waits for ovsdb-server to accept connections inside the container.
+    # docker run -d (and the K3s pod equivalent) return as soon as the
+    # container/pod starts, not once its onboot.sh has ovsdb-server up; without
+    # this, the very next ovs-vsctl call races that startup and fails.
+    # Params:
+    #   float timeoutSeconds: Give up and raise after this many seconds
+    # Return:
+    #   None
+    def __waitForOvsdb(self, timeoutSeconds=10) -> None:
+        backend = self.getBackend()
+        deadline = time.time() + timeoutSeconds
+        while True:
+            result = subprocess.run(f"{backend.exec_prefix(self.getNodeName())} ovs-vsctl show", shell=True, capture_output=True)
+            if result.returncode == 0:
+                return
+            if time.time() >= deadline:
+                raise NodeInstantiationFailed(f"Timed out waiting for ovsdb-server to come up in {self.getNodeName()}")
+            time.sleep(0.2)
 
     # Brief: Set the controller to which the switch will be connecting to
     # Params:
@@ -63,7 +85,7 @@ class Switch(Node):
     #   None
     def setController(self, ip:str, port: int) -> None:
         try:
-            subprocess.run(f"docker exec {self.getNodeName()} ovs-vsctl set-controller {self.getNodeName()} tcp:{ip}:{str(port)}", shell=True)
+            subprocess.run(f"{self.getBackend().exec_prefix(self.getNodeName())} ovs-vsctl set-controller {self.getNodeName()} tcp:{ip}:{str(port)}", shell=True)
         except Exception as ex:
             logging.error(f"Error connecting switch {self.getNodeName()} to controller on IP {ip}/{port}: {str(ex)}")
             raise Exception(f"Error connecting switch {self.getNodeName()} to controller on IP {ip}/{port}: {str(ex)}")
@@ -76,7 +98,7 @@ class Switch(Node):
     #   None
     def __createPort(self, nodeName, peerInterfaceName) -> None:
         try:
-            subprocess.run(f"docker exec {nodeName} ovs-vsctl add-port {nodeName} {peerInterfaceName}", shell=True)
+            subprocess.run(f"{self.getBackend().exec_prefix(nodeName)} ovs-vsctl add-port {nodeName} {peerInterfaceName}", shell=True)
         except Exception as ex:
             logging.error(f"Error while creating port {peerInterfaceName} in switch {nodeName}: {str(ex)}")
             raise Exception(f"Error while creating port {peerInterfaceName} in switch {nodeName}: {str(ex)}")
@@ -95,42 +117,42 @@ class Switch(Node):
 
     def enableNetflow(self, bridgeName: str, destIp: str, destPort: int, activeTimeout=60)  -> None:
         try:
-            subprocess.run(f"docker exec {self.getNodeName()} ovs-vsctl -- set Bridge {bridgeName} netflow=@nf --  --id=@nf create  NetFlow  targets=\\\"{destIp}:{destPort}\\\"  active-timeout={activeTimeout}", shell=True)
+            subprocess.run(f"{self.getBackend().exec_prefix(self.getNodeName())} ovs-vsctl -- set Bridge {bridgeName} netflow=@nf --  --id=@nf create  NetFlow  targets=\\\"{destIp}:{destPort}\\\"  active-timeout={activeTimeout}", shell=True)
         except Exception as ex:
             logging.error(f"Error setting Netflow on {self.getNodeName()} switch: {str(ex)}")
             raise Exception(f"Error setting Netflow on {self.getNodeName()} switch: {str(ex)}")
 
     def clearNetflow(self) -> None:
         try:
-            subprocess.run(f"docker exec {self.getNodeName()} ovs-vsctl clear Bridge {self.getNodeName()} netflow", shell=True)
+            subprocess.run(f"{self.getBackend().exec_prefix(self.getNodeName())} ovs-vsctl clear Bridge {self.getNodeName()} netflow", shell=True)
         except Exception as ex:
             logging.error(f"Error clearing Netflow on {self.getNodeName()} switch: {str(ex)}")
             raise Exception(f"Error clearing Netflow on {self.getNodeName()} switch: {str(ex)}")
 
     def enablesFlow(self, destIp: str, destPort: int, header=128, sampling=64, polling=10)  -> None:
         try:
-            subprocess.run(f"docker exec {self.getNodeName()} ovs-vsctl -- --id=@s create sFlow agent={self.getNodeName()} target=\\\"{destIp}:{destPort}\\\" header={str(header)} sampling={str(sampling)} polling={str(polling)} -- set Bridge {self.getNodeName()} sflow=@s", shell=True)
+            subprocess.run(f"{self.getBackend().exec_prefix(self.getNodeName())} ovs-vsctl -- --id=@s create sFlow agent={self.getNodeName()} target=\\\"{destIp}:{destPort}\\\" header={str(header)} sampling={str(sampling)} polling={str(polling)} -- set Bridge {self.getNodeName()} sflow=@s", shell=True)
         except Exception as ex:
             logging.error(f"Error setting sFlow on {self.getNodeName()} switch: {str(ex)}")
             raise Exception(f"Error setting sFlow on {self.getNodeName()} switch: {str(ex)}")
 
     def clearsFlow(self) -> None:
         try:
-            subprocess.run(f"docker exec {self.getNodeName()} ovs-vsctl clear Bridge {self.getNodeName()} sflow", shell=True)
+            subprocess.run(f"{self.getBackend().exec_prefix(self.getNodeName())} ovs-vsctl clear Bridge {self.getNodeName()} sflow", shell=True)
         except Exception as ex:
             logging.error(f"Error clearing sFlow on {self.getNodeName()} switch: {str(ex)}")
             raise Exception(f"Error clearing sFlow on {self.getNodeName()} switch: {str(ex)}")
 
     def enableIPFIX(self, destIp: str, destPort: int, obsDomainId=123, obsPointId=456, cacheActiveTimeout=60, cacheMaxFlow=60, enableInputSampling=False, enableTunnelSampling=True) -> None:
         try:    
-            subprocess.run(f"docker exec {self.getNodeName()} ovs-vsctl -- set Bridge {self.getNodeName()} ipfix=@i -- --id=@i create IPFIX targets=\\\"{destIp}:{destPort}\\\" obs_domain_id={str(obsDomainId)} obs_point_id={str(obsPointId)} cache_active_timeout={str(cacheActiveTimeout)} cache_max_flows={str(cacheMaxFlow)} other_config:enable-input-sampling={str(enableInputSampling).lower()} other_config:enable-tunnel-sampling={str(enableTunnelSampling).lower()}", shell=True)
+            subprocess.run(f"{self.getBackend().exec_prefix(self.getNodeName())} ovs-vsctl -- set Bridge {self.getNodeName()} ipfix=@i -- --id=@i create IPFIX targets=\\\"{destIp}:{destPort}\\\" obs_domain_id={str(obsDomainId)} obs_point_id={str(obsPointId)} cache_active_timeout={str(cacheActiveTimeout)} cache_max_flows={str(cacheMaxFlow)} other_config:enable-input-sampling={str(enableInputSampling).lower()} other_config:enable-tunnel-sampling={str(enableTunnelSampling).lower()}", shell=True)
         except Exception as ex:
             logging.error(f"Error setting IPFIX on {self.getNodeName()} switch: {str(ex)}")
             raise Exception(f"Error setting IPFIX on {self.getNodeName()} switch: {str(ex)}")
 
     def clearIPFIX(self) -> None:
         try:
-            subprocess.run(f"docker exec {self.getNodeName()} ovs-vsctl clear Bridge {self.getNodeName()} ipfix", shell=True)
+            subprocess.run(f"{self.getBackend().exec_prefix(self.getNodeName())} ovs-vsctl clear Bridge {self.getNodeName()} ipfix", shell=True)
         except Exception as ex:
             logging.error(f"Error clearing IPFIX on {self.getNodeName()} switch: {str(ex)}")
             raise Exception(f"Error clearing IPFIX on {self.getNodeName()} switch: {str(ex)}")
@@ -150,7 +172,7 @@ class Switch(Node):
             interfaces = list(set(interfaces) - set(['lo', 'ovs-system']))
             options = ['-i ' + interface for interface in interfaces]
             options = ' '.join(options)
-            subprocess.run(f"docker exec {self.getNodeName()} tshark {options} -b duration:{rotateInterval} -w {path} > /dev/null 2>&1 &", shell=True)
+            subprocess.run(f"{self.getBackend().exec_prefix(self.getNodeName())} tshark {options} -b duration:{rotateInterval} -w {path} > /dev/null 2>&1 &", shell=True)
         except Exception as ex:
             logging.error(f"Error set the collector on {self.getNodeName()}: {str(ex)}")
             raise Exception(f"Error set the collector on {self.getNodeName()}: {str(ex)}")
@@ -160,7 +182,7 @@ class Switch(Node):
     # Return:
     def __addDefaultRoute(self) -> None:
         try:
-            subprocess.run(f"docker exec {self.getNodeName()} ip route add 0.0.0.0/0 dev {self.getNodeName()}", shell=True)
+            subprocess.run(f"{self.getBackend().exec_prefix(self.getNodeName())} ip route add 0.0.0.0/0 dev {self.getNodeName()}", shell=True)
         except Exception as ex:
             logging.error(f"Error adding route default route for switch {self.getNodeName()}: {str(ex)}")
             raise Exception(f"Error adding route default route for switch {self.getNodeName()}: {str(ex)}")

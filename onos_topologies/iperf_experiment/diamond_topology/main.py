@@ -7,9 +7,11 @@ sys.path.insert(0, str(project_root))
 
 from onos_topologies.dash_topology.dash_topology import DashTopology
 from onos_topologies.dash_topology import utils
+from profissa_lft.env import get_backend
 
 
 def get_network_summary(topo):
+    backend = get_backend()
     lines = ["\n" + "="*60]
     lines.append(" [LINK INSPECTION] Current Ports Status (tc)")
 
@@ -20,7 +22,7 @@ def get_network_summary(topo):
 
     for sw_name, interface in links_to_check:
         sw_id = sw_name.split('(')[1].replace(')', '')
-        cmd = f"docker exec {sw_id} tc qdisc show dev {interface}"
+        cmd = f"{backend.exec_prefix(sw_id)} tc qdisc show dev {interface}"
         res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         clean_res = res.stdout.replace("qdisc netem 90d4: root refcnt 2 ", "").strip()
         lines.append(f" {sw_name} [{interface}]: {clean_res}")
@@ -47,20 +49,21 @@ def start_ollama():
 # Band 1:2 - ICMP (ping): medium priority
 # Band 1:3 - iperf TCP port 5201: lowest priority, rate capped at bottleneck_rate
 def setup_prio_netem(sw: str, iface: str, delay_ms: int, jitter_ms: int = 0, bottleneck_rate: str = "10mbit"):
+    backend = get_backend()
     cmds = [
-        f"docker exec {sw} tc qdisc del dev {iface} root 2>/dev/null || true",
-        f"docker exec {sw} tc qdisc add dev {iface} root handle 1: prio bands 3 priomap 2 2 2 2 2 2 2 2 1 1 1 1 1 1 1 1",
+        f"{backend.exec_prefix(sw)} tc qdisc del dev {iface} root 2>/dev/null || true",
+        f"{backend.exec_prefix(sw)} tc qdisc add dev {iface} root handle 1: prio bands 3 priomap 2 2 2 2 2 2 2 2 1 1 1 1 1 1 1 1",
         # all bands share the same base delay and rate
-        f"docker exec {sw} tc qdisc add dev {iface} parent 1:1 handle 10: netem delay {delay_ms}ms {jitter_ms}ms",
-        f"docker exec {sw} tc qdisc add dev {iface} parent 1:2 handle 20: netem delay {delay_ms}ms {jitter_ms}ms",
-        f"docker exec {sw} tc qdisc add dev {iface} parent 1:3 handle 30: netem delay {delay_ms}ms {jitter_ms}ms rate {bottleneck_rate}",
+        f"{backend.exec_prefix(sw)} tc qdisc add dev {iface} parent 1:1 handle 10: netem delay {delay_ms}ms {jitter_ms}ms",
+        f"{backend.exec_prefix(sw)} tc qdisc add dev {iface} parent 1:2 handle 20: netem delay {delay_ms}ms {jitter_ms}ms",
+        f"{backend.exec_prefix(sw)} tc qdisc add dev {iface} parent 1:3 handle 30: netem delay {delay_ms}ms {jitter_ms}ms rate {bottleneck_rate}",
         # MaoLinkQuality probes (0x3366) -> band 1:1 (highest priority)
-        f"docker exec {sw} tc filter add dev {iface} parent 1: protocol all prio 1 u32 match u16 0x3366 0xffff at -2 flowid 1:1",
+        f"{backend.exec_prefix(sw)} tc filter add dev {iface} parent 1: protocol all prio 1 u32 match u16 0x3366 0xffff at -2 flowid 1:1",
         # ICMP -> band 1:2
-        f"docker exec {sw} tc filter add dev {iface} parent 1: protocol ip prio 2 u32 match ip protocol 1 0xff flowid 1:2",
+        f"{backend.exec_prefix(sw)} tc filter add dev {iface} parent 1: protocol ip prio 2 u32 match ip protocol 1 0xff flowid 1:2",
         # iperf TCP port 5201 (both directions) -> band 1:3 (lowest priority, rate limited)
-        f"docker exec {sw} tc filter add dev {iface} parent 1: protocol ip prio 3 u32 match ip protocol 6 0xff match ip dport 5201 0xffff flowid 1:3",
-        f"docker exec {sw} tc filter add dev {iface} parent 1: protocol ip prio 3 u32 match ip protocol 6 0xff match ip sport 5201 0xffff flowid 1:3",
+        f"{backend.exec_prefix(sw)} tc filter add dev {iface} parent 1: protocol ip prio 3 u32 match ip protocol 6 0xff match ip dport 5201 0xffff flowid 1:3",
+        f"{backend.exec_prefix(sw)} tc filter add dev {iface} parent 1: protocol ip prio 3 u32 match ip protocol 6 0xff match ip sport 5201 0xffff flowid 1:3",
     ]
     for cmd in cmds:
         subprocess.run(cmd, shell=True)
@@ -90,6 +93,7 @@ def main(
     """
         Step: Defining Experiment Constants
     """
+    backend = get_backend()
     ROTATE_S = 60 # seconds per snapshot
     DEGRADED_ITERS = {2, 4, 6}
     server_name = "ds0"
@@ -192,7 +196,7 @@ def main(
         comp = "com.maojianwei.link.quality.measurement.impl.MaoLinkQualityManager"
         karaf = "/home/onos/apache-karaf-4.2.14/bin/client -u karaf -p karaf"
         cmd_str = f"cfg set {comp} latencyAverageSize 1; cfg set {comp} probeInterval 500; cfg set {comp} calculateInterval 500"
-        subprocess.run(f"echo '{cmd_str}' | sudo docker exec -i c1 {karaf}",
+        subprocess.run(f"echo '{cmd_str}' | sudo {backend.exec_prefix('c1', interactive=True)} {karaf}",
                        shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         topo.servers[server_name].startServer(port=5201)
@@ -259,7 +263,7 @@ def main(
         for client_name in topo.clients.keys():
             out_txt = ping_dir / f"{client_name}.txt"
             f_out = open(out_txt, "w", encoding="utf-8")
-            cmd = ["sudo", "docker", "exec", client_name, "ping", server_ip, "-i", "0.5", "-D", "-O"]
+            cmd = ["sudo"] + backend.exec_argv(client_name) + ["ping", server_ip, "-i", "0.5", "-D", "-O"]
             proc = subprocess.Popen(cmd, stdout=f_out, stderr=subprocess.STDOUT, text=True)
             ping_jobs.append((proc, f_out))
 
@@ -294,15 +298,15 @@ def main(
                     if snap_idx in DEGRADED_ITERS:
                         msg = f"\n [DEGRADE] Snapshot {snap_idx}: Degradando link MG <-> ES"
                         for sw, iface in [("s1", "s1s0"), ("s0", "s0s1")]:
-                            subprocess.run(f"docker exec {sw} tc qdisc change dev {iface} parent 1:1 handle 10: netem delay {DEGRADED_DELAY_MS}ms {cfg_jitter}ms", shell=True, check=True)
-                            subprocess.run(f"docker exec {sw} tc qdisc change dev {iface} parent 1:2 handle 20: netem delay {DEGRADED_DELAY_MS}ms {cfg_jitter}ms", shell=True, check=True)
-                            subprocess.run(f"docker exec {sw} tc qdisc change dev {iface} parent 1:3 handle 30: netem delay {DEGRADED_DELAY_MS}ms {cfg_jitter}ms rate {DEGRADED_RATE}", shell=True, check=True)
+                            subprocess.run(f"{backend.exec_prefix(sw)} tc qdisc change dev {iface} parent 1:1 handle 10: netem delay {DEGRADED_DELAY_MS}ms {cfg_jitter}ms", shell=True, check=True)
+                            subprocess.run(f"{backend.exec_prefix(sw)} tc qdisc change dev {iface} parent 1:2 handle 20: netem delay {DEGRADED_DELAY_MS}ms {cfg_jitter}ms", shell=True, check=True)
+                            subprocess.run(f"{backend.exec_prefix(sw)} tc qdisc change dev {iface} parent 1:3 handle 30: netem delay {DEGRADED_DELAY_MS}ms {cfg_jitter}ms rate {DEGRADED_RATE}", shell=True, check=True)
                     else:
                         msg = f"\n [NORMAL] Snapshot {snap_idx}: Link MG <-> ES operando normalmente"
                         for sw, iface in [("s1", "s1s0"), ("s0", "s0s1")]:
-                            subprocess.run(f"docker exec {sw} tc qdisc change dev {iface} parent 1:1 handle 10: netem delay {cfg_delay}ms {cfg_jitter}ms", shell=True, check=True)
-                            subprocess.run(f"docker exec {sw} tc qdisc change dev {iface} parent 1:2 handle 20: netem delay {cfg_delay}ms {cfg_jitter}ms", shell=True, check=True)
-                            subprocess.run(f"docker exec {sw} tc qdisc change dev {iface} parent 1:3 handle 30: netem delay {cfg_delay}ms {cfg_jitter}ms rate 35mbit", shell=True, check=True)
+                            subprocess.run(f"{backend.exec_prefix(sw)} tc qdisc change dev {iface} parent 1:1 handle 10: netem delay {cfg_delay}ms {cfg_jitter}ms", shell=True, check=True)
+                            subprocess.run(f"{backend.exec_prefix(sw)} tc qdisc change dev {iface} parent 1:2 handle 20: netem delay {cfg_delay}ms {cfg_jitter}ms", shell=True, check=True)
+                            subprocess.run(f"{backend.exec_prefix(sw)} tc qdisc change dev {iface} parent 1:3 handle 30: netem delay {cfg_delay}ms {cfg_jitter}ms rate 35mbit", shell=True, check=True)
 
                     print(msg)
                     utils.append_event(run_root, msg)
@@ -313,12 +317,12 @@ def main(
                 try:
                     if snap_idx in DEGRADED_ITERS:
                         msg  = f" [FAILURE] Snapshot {snap_idx}: Taking down link MG <-> ES (IP LINK DOWN)"
-                        cmd1 = "sudo docker exec s1 ip link set s1s0 down"
-                        cmd2 = "sudo docker exec s0 ip link set s0s1 down"
+                        cmd1 = f"sudo {backend.exec_prefix('s1')} ip link set s1s0 down"
+                        cmd2 = f"sudo {backend.exec_prefix('s0')} ip link set s0s1 down"
                     else:
                         msg  = f" [RECOVERY] Snapshot {snap_idx}: Restoring link MG <-> ES (IP LINK UP)"
-                        cmd1 = "sudo docker exec s1 ip link set s1s0 up"
-                        cmd2 = "sudo docker exec s0 ip link set s0s1 up"
+                        cmd1 = f"sudo {backend.exec_prefix('s1')} ip link set s1s0 up"
+                        cmd2 = f"sudo {backend.exec_prefix('s0')} ip link set s0s1 up"
 
                     print(msg)
                     utils.append_event(run_root, msg)
@@ -374,7 +378,7 @@ def main(
             for client_name in topo.clients.keys():
                 out_json = iperf_dir / f"{client_name}%{snap_idx}.json"
                 f_out    = open(out_json, "w", encoding="utf-8")
-                cmd      = ["sudo", "docker", "exec", client_name, "bash", "-lc",
+                cmd      = ["sudo"] + backend.exec_argv(client_name) + ["bash", "-lc",
                             f"iperf3 -c {server_ip} -p 5201 -t {ROTATE_S} -i 1 -J --connect-timeout 10000"]
                 proc = subprocess.Popen(cmd, stdout=f_out, stderr=subprocess.STDOUT, text=True)
                 iperf_jobs.append((proc, f_out))
@@ -453,7 +457,7 @@ def main(
 
         if auto_start_containers:
             for container in ("supervisor", "deployer"):
-                subprocess.run(f"sudo docker rm -f {container} 2>/dev/null || true", shell=True)
+                backend.delete_node(container)
 
         try:
             utils.cleanup()

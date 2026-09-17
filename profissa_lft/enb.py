@@ -30,7 +30,8 @@ class EnB(Perfsonar):
         self.config = self.readConfigFile(self.defaultEnBConfigPath)
 
     def start(self, transmitterIp="*", transmitterPort=2000, receiverIp="localhost", receiverPort=2001) -> None:
-        super().run(f"{self.buildDir}/srsenb/src/srsenb --rf.device_name=zmq --rf.device_args=\'fail_on_disconnect=true,tx_port=tcp://{transmitterIp}:{transmitterPort},rx_port=tcp://{receiverIp}:{receiverPort},id=enb,base_srate=11.52e6\' > enb.log")
+        # srsenb keeps running until stop() kills it - must not wait for it to exit.
+        super().run(f"{self.buildDir}/srsenb/src/srsenb --rf.device_name=zmq --rf.device_args=\'fail_on_disconnect=true,tx_port=tcp://{transmitterIp}:{transmitterPort},rx_port=tcp://{receiverIp}:{receiverPort},id=enb,base_srate=11.52e6\' > enb.log", background=True)
 
     def stop(self) -> None:
         super().run("pkill -f -9 srsenb")
@@ -50,12 +51,14 @@ class EnB(Perfsonar):
     def starGnuRadioMultiUE(self, multiUEPath='') -> None:
         if multiUEPath == '':
             multiUEPath = self.defaultMultiUEPath
-        super().run(f"python3 {multiUEPath}")
+        # Keeps running until stopGnuRadioMultiUE() kills it - don't wait for it to exit.
+        super().run(f"python3 {multiUEPath}", background=True)
 
     def starGnuRadioSingleUE(self, singleUEPath='') -> None:
         if singleUEPath == '':
             singleUEPath = self.defaultSingleUEPath
-        super().run(f"python3 {singleUEPath}")
+        # Same as starGnuRadioMultiUE: long-running, don't wait for it to exit.
+        super().run(f"python3 {singleUEPath}", background=True)
 
     def stopGnuRadioMultiUE(self) -> None:
         super().run(f"pkill -f -9 multiUE")

@@ -13,15 +13,17 @@ sys.path.insert(0, str(project_root))
 from onos_topologies.dash_topology.dash_topology import DashTopology
 from onos_topologies.dash_topology import utils
 from onos_topologies.dash_topology.constants import DEFAULT_CONFIG
+from profissa_lft.env import get_backend
 
 
 def start_dash_clients_batch(client_batch: list[str], server_ips: list[str], scheme: str = "http") -> list[subprocess.Popen]:
+    backend = get_backend()
     procs: list[subprocess.Popen] = []
 
     for cname in client_batch:
         srv = random.choice(server_ips)
-        cmd = [
-            "sudo", "docker", "exec", cname, "bash", "-lc",
+        cmd = ["sudo"] + backend.exec_argv(cname) + [
+            "bash", "-lc",
             f"/usr/local/bin/dash-client -y -hostname {srv} -scheme {scheme}",
         ]
         print(f"[DIAG] start {cname} -> server {srv}")

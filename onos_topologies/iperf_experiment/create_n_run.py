@@ -9,6 +9,7 @@ sys.path.insert(0, str(project_root))
 
 from onos_topologies.dash_topology.dash_topology import DashTopology
 from onos_topologies.dash_topology import utils
+from profissa_lft.env import get_backend
 
 
 MODES = {
@@ -47,7 +48,8 @@ if __name__ == "__main__":
         comp = "com.maojianwei.link.quality.measurement.impl.MaoLinkQualityManager"
         karaf = "/home/onos/apache-karaf-4.2.14/bin/client -u karaf -p karaf"
         cmd_str = f"cfg set {comp} latencyAverageSize 1; cfg set {comp} probeInterval 500; cfg set {comp} calculateInterval 500"
-        subprocess.run(f"echo '{cmd_str}' | sudo docker exec -i c1 {karaf}",
+        backend = get_backend()
+        subprocess.run(f"echo '{cmd_str}' | sudo {backend.exec_prefix('c1', interactive=True)} {karaf}",
                        shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     else:
         print(" [SETUP] Telemetry skipped (not available on ONOS 1.6 / OSPF mode)")

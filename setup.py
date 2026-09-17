@@ -29,7 +29,7 @@ setup(
     version='1.0.10',
     packages=find_packages(),
     py_modules=['cli'],
-    install_requires=['pandas', 'paramiko', 'requests', 'rich'],
+    install_requires=['pandas', 'paramiko<4', 'requests', 'rich', 'click'],
     entry_points={
         'console_scripts': [
             'lft=cli:main',

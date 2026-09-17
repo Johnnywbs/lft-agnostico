@@ -50,12 +50,13 @@ class Router(Node):
         try:
             name1 = self.getNodeName()
             name2 = other_node.getNodeName()
-            
+            backend = self.getBackend()
+
             subprocess.run(f"sudo ip link delete {if1} 2>/dev/null || true", shell=True)
             subprocess.run(f"sudo ip link delete {if2} 2>/dev/null || true", shell=True)
 
-            pid1 = subprocess.check_output(f"docker inspect -f '{{{{.State.Pid}}}}' {name1}", shell=True, text=True).strip()
-            pid2 = subprocess.check_output(f"docker inspect -f '{{{{.State.Pid}}}}' {name2}", shell=True, text=True).strip()
+            pid1 = backend.node_pid(name1)
+            pid2 = backend.node_pid(name2)
 
             symlink_cmd = (
                 f"sudo mkdir -p /var/run/netns && "
@@ -68,8 +69,8 @@ class Router(Node):
                 f"sudo ip link add {if1} type veth peer name {if2} && "
                 f"sudo ip link set {if1} netns {name1} && "
                 f"sudo ip link set {if2} netns {name2} && "
-                f"sudo docker exec {name1} ip link set {if1} up && "
-                f"sudo docker exec {name2} ip link set {if2} up"
+                f"sudo {backend.exec_prefix(name1)} ip link set {if1} up && "
+                f"sudo {backend.exec_prefix(name2)} ip link set {if2} up"
             )
             subprocess.run(cmd, shell=True, check=True, stdout=subprocess.DEVNULL)
 
@@ -86,7 +87,7 @@ class Router(Node):
     # Return:
     #   None
     def setInterfaceProperties(self, interfaceName: str, throughput: str, delay: str, jitter: str) -> None:
-        cmd = f"docker exec {self.getNodeName()} tc qdisc replace dev {interfaceName} root netem delay {delay} rate {throughput}"
+        cmd = f"{self.getBackend().exec_prefix(self.getNodeName())} tc qdisc replace dev {interfaceName} root netem delay {delay} rate {throughput}"
         try:
             subprocess.run(cmd, shell=True, check=True, stdout=subprocess.DEVNULL)
         except Exception as ex:
@@ -99,7 +100,7 @@ class Router(Node):
     # Return:
     #   None
     def run(self, cmd: str) -> None:
-        full_cmd = f'docker exec {self.getNodeName()} /bin/bash -c "{cmd}"'
+        full_cmd = f'{self.getBackend().exec_prefix(self.getNodeName())} /bin/bash -c "{cmd}"'
         try:
             subprocess.run(full_cmd, shell=True, check=True)
         except Exception as ex:
@@ -114,7 +115,7 @@ class Router(Node):
     # Return:
     #   None
     def setIp(self, ip: str, mask: int, interfaceName: str) -> None:
-        cmd = f"docker exec {self.getNodeName()} ip addr add {ip}/{mask} dev {interfaceName}"
+        cmd = f"{self.getBackend().exec_prefix(self.getNodeName())} ip addr add {ip}/{mask} dev {interfaceName}"
         try:
             subprocess.run(cmd, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception as ex:

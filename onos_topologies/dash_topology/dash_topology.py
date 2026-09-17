@@ -57,6 +57,15 @@ class DashTopology:
         # ONOS controller (object)
         self.controller = ""
 
+        # PoPs whose edge router already owns the /24 gateway address on one
+        # interface (L3/OSPF mode). Every other host in the same PoP is linked
+        # to the router with a dedicated /32 + static host route instead,
+        # since each host is a separate point-to-point veth, not a shared LAN
+        # segment: assigning the same /24 to every veth makes the kernel's
+        # directly-connected route ambiguous across interfaces and only one
+        # host per PoP ends up actually reachable.
+        self._ospf_gateway_owner = {}
+
         # PoP list of client Node (used by collectFlows to select host-facing ports)
         self.hosts_by_pop = {pop[0]: [] for pop in self.config['pops']}
 
@@ -96,6 +105,49 @@ class DashTopology:
         return (switch_ip_range, server_ip_range, client_ip_range, [p[0] for p in pops])
 
 
+    # Brief: Wire a server/client veth to its PoP's edge router in L3/OSPF mode.
+    # Each host has its own point-to-point veth to the router, not a shared LAN
+    # segment. Giving every one of those veths the same /24 gateway address
+    # (as if they were all on one broadcast segment) makes the kernel's
+    # directly-connected route for that /24 ambiguous across interfaces, so
+    # only one host per PoP ends up actually reachable - the root cause of the
+    # "network unreachable"/"no route to host" failures seen between PoPs.
+    # Params:
+    #   String pop: PoP name (e.g. "PoP-AC")
+    #   int pop_idx: Index of pop in self.config['pops'], used to derive the subnet
+    #   Router edge_node: The PoP's Quagga router
+    #   String gateway_ip: The PoP's gateway IP (192.168.{10+pop_idx}.1)
+    #   String host_ip: IP address of the server/client being linked
+    #   String sw_if: Router-side interface name for this host's veth
+    # Return:
+    #   None
+    def __link_router_to_host(self, pop: str, pop_idx: int, edge_node, gateway_ip: str, host_ip: str, sw_if: str) -> None:
+        if pop not in self._ospf_gateway_owner:
+            # First host in this PoP: this interface owns the gateway IP and
+            # is the one counted by the OSPF "network" statement below, which
+            # is what makes the PoP's subnet reachable from other PoPs.
+            edge_node.setIp(gateway_ip, 24, sw_if)
+            edge_node.run(f"echo -e 'interface {sw_if}\\n ip address {gateway_ip}/24\\n!' >> /etc/quagga/zebra.conf")
+            edge_node.run(f"echo -e 'router ospf\\n network 192.168.{10 + pop_idx}.0/24 area 0.0.0.0\\n!' >> /etc/quagga/ospfd.conf")
+            edge_node.run(f"echo -e 'interface {sw_if}\\n ip ospf network point-to-point\\n!' >> /etc/quagga/ospfd.conf")
+            self._ospf_gateway_owner[pop] = sw_if
+        else:
+            # Any other host in the same PoP: give this veth the same
+            # gateway_ip but as a /32, not the /24 used on the primary
+            # interface. A /32 is a strictly more specific prefix, so it
+            # never collides with the primary interface's /24 connected
+            # route - but, unlike leaving the interface with no address at
+            # all, it still gives the router a valid local IPv4 source to
+            # ARP from and to originate/forward traffic out of this
+            # interface (an addressless interface can't reliably ARP for
+            # its peer, which is why a bare static route alone isn't
+            # enough - confirmed empirically: even the router itself
+            # couldn't ping a host behind an unnumbered link). The explicit
+            # /32 host route then forces return traffic through this
+            # specific veth instead of the primary interface.
+            edge_node.setIp(gateway_ip, 32, sw_if)
+            edge_node.run(f"ip route add {host_ip}/32 dev {sw_if}")
+
     # Brief: Create and configure all DashServer containers
     def __create_servers(self, iperf=False):
         ds_index = 0
@@ -124,18 +176,22 @@ class DashTopology:
                 ds.connect(edge_node, ds_if, sw_if)
 
                 server_ip = self.server_ip_range[ds_index]
-                ds.setIp(server_ip, 24, ds_if)
+                # L3 mode: each host's veth is a private point-to-point link to
+                # the router, not a shared LAN - a /24 here would make the
+                # kernel treat sibling hosts in the same PoP as on-link and
+                # try to ARP them directly (which always fails, since there is
+                # no real L2 path between them). A /32 keeps the host from
+                # assuming anything is reachable except via its gateway.
+                ds.setIp(server_ip, 32 if gateway_ip else 24, ds_if)
                 print(f"  ... Host {dsname} ({server_ip}) created and linked to {pop}")
 
                 # Configure L3 Routing and OSPF advertising
                 if gateway_ip:
-                    edge_node.setIp(gateway_ip, 24, sw_if)
-                    ds.run(f"ip route add default via {gateway_ip}")
-                    
-                    # Inject configuration into Quagga daemons
-                    edge_node.run(f"echo -e 'interface {sw_if}\\n ip address {gateway_ip}/24\\n!' >> /etc/quagga/zebra.conf")
-                    edge_node.run(f"echo -e 'router ospf\\n network 192.168.{10 + pop_idx}.0/24 area 0.0.0.0\\n!' >> /etc/quagga/ospfd.conf")
-                    edge_node.run(f"echo -e 'interface {sw_if}\\n ip ospf network point-to-point\\n!' >> /etc/quagga/ospfd.conf")
+                    # "onlink" is required because gateway_ip falls outside
+                    # the host's own /32 - without it the kernel rejects the
+                    # route ("Nexthop has invalid gateway").
+                    ds.setDefaultRoute(gateway_ip, ds_if)
+                    self.__link_router_to_host(pop, pop_idx, edge_node, gateway_ip, server_ip, sw_if)
 
                 if self.config.get("apply_link_properties"):
                     if self.config.get("randomize_link_properties"):
@@ -185,16 +241,14 @@ class DashTopology:
                 cl.connect(edge_node, cl_if, sw_if)
 
                 client_ip = self.client_ip_range[cli_index]
-                cl.setIp(client_ip, 24, cl_if)
+                # See __create_servers: /32 in L3 mode so this host never
+                # assumes a sibling in the same PoP is on-link.
+                cl.setIp(client_ip, 32 if gateway_ip else 24, cl_if)
                 print(f"  ... Host {cname} ({client_ip}) created and linked to {pop}")
 
                 if gateway_ip:
-                    edge_node.setIp(gateway_ip, 24, sw_if)
-                    cl.run(f"ip route add default via {gateway_ip}")
-                    
-                    edge_node.run(f"echo -e 'interface {sw_if}\\n ip address {gateway_ip}/24\\n!' >> /etc/quagga/zebra.conf")
-                    edge_node.run(f"echo -e 'router ospf\\n network 192.168.{10 + pop_idx}.0/24 area 0.0.0.0\\n!' >> /etc/quagga/ospfd.conf")
-                    edge_node.run(f"echo -e 'interface {sw_if}\\n ip ospf network point-to-point\\n!' >> /etc/quagga/ospfd.conf")
+                    cl.run(f"ip route add default via {gateway_ip} dev {cl_if} onlink")
+                    self.__link_router_to_host(pop, pop_idx, edge_node, gateway_ip, client_ip, sw_if)
 
                 if self.config.get("apply_link_properties"):
                     if self.config.get("randomize_link_properties"):
@@ -469,32 +523,71 @@ class DashTopology:
             
         print(f"[OK] {len(connections_made)} OSPF inter-PoP links created and configured!\n")
 
-    # Brief: Force host discovery in ONOS by sending ARP/ICMP traffic
+    # Brief: Waits until every router's kernel routing table has a route to
+    # every PoP's subnet, i.e. OSPF has actually converged. zebra/ospfd get
+    # killed and restarted twice (once after clients, once after servers) -
+    # a fixed few-second sleep after that is not enough for hello/LSA
+    # exchange and SPF calculation across a many-router mesh, so traffic
+    # sent too early silently has no route on some routers even though the
+    # topology "finished" building without error.
+    # Params:
+    #   float timeoutSeconds: Give up and proceed anyway after this long
+    # Return:
+    #   None
+    def __wait_for_ospf_convergence(self, timeoutSeconds: float = 60) -> None:
+        print("\n[OSPF] Waiting for OSPF adjacencies to converge across all routers...")
+        expected_subnets = [f"192.168.{10 + i}.0/24" for i in range(len(self.config['pops']))]
+        deadline = time.time() + timeoutSeconds
+        while True:
+            missing = []
+            for pop, router in self.routers.items():
+                result = subprocess.run(
+                    f"ip -n {router.getNodeName()} route", shell=True, capture_output=True, text=True,
+                )
+                for subnet in expected_subnets:
+                    if subnet not in result.stdout:
+                        missing.append(f"{pop} -> {subnet}")
+            if not missing:
+                print("[OK] All routers have routes to every PoP subnet.\n")
+                return
+            if time.time() >= deadline:
+                print(f"[WARNING] OSPF did not fully converge within {timeoutSeconds}s - "
+                      f"{len(missing)} router/subnet pair(s) still missing a route, proceeding anyway:")
+                for m in missing[:10]:
+                    print(f"    {m}")
+                return
+            time.sleep(1)
+
+    # Brief: Force host discovery in ONOS by sending ARP/ICMP traffic. In
+    # L3/OSPF mode 192.168.0.254 is unreachable (each PoP has its own
+    # subnet) and ONOS doesn't do ARP-based discovery there anyway (Quagga
+    # routes, not OpenFlow), so this is a harmless no-op in that mode.
     def __run_ping(self) -> None:
         print("\n[DISCOVERY] Forcing host discovery for ONOS...")
 
         # self.values = {server_name: server_obj}
         for server in self.servers.values():
             print(f"  ... Ping: ALL Servers -> 192.168.0.254") # non-attributed IP addr. Just sends ARP and ONOS discovers it
-            server.run(f'bash -lc "ping -c 1 192.168.0.254"')
+            server.pingFromHost("192.168.0.254")
 
         # self.clients = {client_name: client_obj}
         for client in self.clients.values():
             print(f"  ... Ping: ALL Clients -> 192.168.0.254")
-            client.run(f'bash -lc "ping -c 1 192.168.0.254"')
+            client.run(f'bash -lc "ping -c 1 192.168.0.254 || true"')
 
         print("  ... Discovery packets sent. Waiting 3s for ONOS to process.")
         utils.sleep_countdown(3)
         print("[OK] Hosts should be visible in ONOS.\n")
 
 
+    # Brief: See __run_ping - same harmless no-op in L3/OSPF mode.
     def __discover_dash_servers(self) -> None:
         probe_ip = "192.168.0.254"
         print("\n[DISCOVERY] Priming servers (ARP via ping) ...")
 
         for sname, server in self.servers.items():
             print(f"  ... {sname}: ping {probe_ip}")
-            server.run(f'sh -lc "ping -c 1 -W 1 {probe_ip} >/dev/null 2>&1 || true"')
+            server.pingFromHost(probe_ip, timeoutSeconds=1)
         print("  ... waiting 3s for ONOS /hosts update")
         utils.sleep_countdown(3)
         print("[OK] Servers should be visible in ONOS /hosts.\n")
@@ -542,6 +635,9 @@ class DashTopology:
             # Only for the iperf experiment!!
             self.__create_clients(iperf=True)
             self.__create_servers(iperf=True)
+
+        if "1.6" in self.onos_version:
+            self.__wait_for_ospf_convergence()
 
         self.__discover_dash_servers()
 

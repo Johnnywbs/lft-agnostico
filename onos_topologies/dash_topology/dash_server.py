@@ -1,4 +1,5 @@
 import os
+import subprocess
 from pathlib import Path
 import logging
 from profissa_lft.host import Host
@@ -43,3 +44,16 @@ class DashServer(Host):
         if interfaceName == '':
             interfaceName = self.getNodeName()
         self._Node__setIp(ip, mask, interfaceName)
+
+    # Brief: neubot/dash:latest ships no shell/tc at all, so the base class's
+    # docker-exec-based tc command ("command not found") can't run here.
+    # Shape traffic via the host's own tc against this node's namespace
+    # instead, the same way setIp above bypasses the container entirely.
+    def setInterfaceProperties(self, interfaceName: str, throughput: str, delay: str, jitter: str) -> None:
+        result = subprocess.run(
+            f"ip netns exec {self.getNodeName()} tc qdisc add dev {interfaceName} root netem delay {delay} {jitter} rate {throughput}",
+            shell=True, capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            logging.error(f"Error setting interface properties on {self.getNodeName()} ({interfaceName}): {result.stderr.strip()}")
+            raise Exception(f"Error setting interface properties on {self.getNodeName()} ({interfaceName}): {result.stderr.strip()}")

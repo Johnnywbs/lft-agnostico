@@ -8,6 +8,7 @@ sys.path.insert(0, str(project_root))
 from constants import CONFIG_RNP
 from onos_topologies.dash_topology.dash_topology import DashTopology
 from onos_topologies.dash_topology import utils
+from profissa_lft.env import get_backend
 
 
 MODES = {
@@ -84,6 +85,7 @@ def main():
 
     mode_cfg = MODES[algorithm]
     service  = mode_cfg["name"]
+    backend = get_backend()
 
 
     # Cria diretorio de resultados igual ao diamond_topology
@@ -122,7 +124,7 @@ def main():
             comp = "com.maojianwei.link.quality.measurement.impl.MaoLinkQualityManager"
             karaf = "/home/onos/apache-karaf-4.2.14/bin/client -u karaf -p karaf"
             cmd_str = f"cfg set {comp} latencyAverageSize 1; cfg set {comp} probeInterval 500; cfg set {comp} calculateInterval 500"
-            subprocess.run(f"echo '{cmd_str}' | sudo docker exec -i c1 {karaf}",
+            subprocess.run(f"echo '{cmd_str}' | sudo {backend.exec_prefix('c1', interactive=True)} {karaf}",
                         shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
             print(" [SETUP] Telemetry skipped (not available on ONOS 1.6 / OSPF mode)")
@@ -175,10 +177,7 @@ def main():
             for srv_ip, ports in server_ports.items():
                 srv_name = server_keys[topo.server_ip_range.index(srv_ip)]
                 for port in ports:
-                    subprocess.run(
-                        f"docker exec -d {srv_name} bash -lc 'iperf3 -s -p {port}'",
-                        shell=True
-                    )
+                    backend.exec_detached(srv_name, f"bash -lc 'iperf3 -s -p {port}'")
                     print(f" [SERVER] {srv_name} ({srv_ip}) listening on :{port}")
             time.sleep(2)
 
@@ -198,7 +197,7 @@ def main():
                 print(f" [IPERF] {client_name} ({client_ip}) -> {assigned_server}:{port}")
                 f_out = open(out_json, "w", encoding="utf-8")
                 p = subprocess.Popen(
-                    ["sudo", "docker", "exec", client_name, "iperf3",
+                    ["sudo"] + backend.exec_argv(client_name) + ["iperf3",
                      "-c", assigned_server, "-p", str(port),
                      "--connect-timeout", "3000", "-b", "35M", "-t", "200",
                      "--forceflush", "-J"],
@@ -220,7 +219,7 @@ def main():
                 with open(out_json, "w", encoding="utf-8") as f_out:
                     try:
                         subprocess.run(
-                            ["sudo", "docker", "exec", client_name, "iperf3",
+                            ["sudo"] + backend.exec_argv(client_name) + ["iperf3",
                              "-c", clean_server_ip, "--connect-timeout", "3000", "-J"],
                             stdout=f_out, stderr=subprocess.STDOUT, text=True,
                             timeout=20

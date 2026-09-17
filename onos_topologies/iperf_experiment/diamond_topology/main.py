@@ -179,7 +179,6 @@ def main(
         start_ollama()
 
     try:
-        utils.cleanup()
 
         onos_tag = f"onosproject/onos:{mode_cfg['onos']}"
         topo = DashTopology(config=CONFIG, results_dir=run_root, iperf=True, onos_version=onos_tag)

@@ -194,10 +194,13 @@ def build_pod_manifest(name: str, parsed: dict, node_name: str) -> dict:
     }
     if volumes:
         spec["volumes"] = volumes
-    if parsed["sysctls"]:
-        spec["securityContext"] = {
-            "sysctls": [{"name": k, "value": v} for k, v in parsed["sysctls"].items()]
-        }
+    # Sysctls are NOT declared here via securityContext.sysctls - Kubernetes
+    # rejects most of them (e.g. net.ipv4.ip_forward) with "not allowlisted"
+    # unless the kubelet is explicitly configured to allow each one, even on
+    # an already-privileged pod. create_node() applies them with `sysctl -w`
+    # via exec after the pod is Running instead, using the same NET_ADMIN
+    # capability the container already has - works regardless of kubelet
+    # config, matching what `docker run --sysctl ...` gives for free.
     if parsed["dns"]:
         spec["dnsPolicy"] = "None"
         spec["dnsConfig"] = {"nameservers": [parsed["dns"]]}
@@ -369,4 +372,10 @@ class K3sBackend(InfraBackend):
             raise NodeInstantiationFailed(f"Error while creating the pod {name}: {str(ex)}")
 
         self._wait_running(name)
+        for sysctl_name, value in parsed["sysctls"].items():
+            subprocess.run(
+                ["kubectl", "exec", "-n", NAMESPACE, name, "--",
+                 "sysctl", "-w", f"{sysctl_name}={value}"],
+                check=True, capture_output=True,
+            )
         self._fix_default_route(name)

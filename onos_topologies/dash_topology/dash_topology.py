@@ -1,3 +1,4 @@
+import json
 import os
 import random
 import subprocess
@@ -325,14 +326,21 @@ class DashTopology:
                 print("Waiting for OSPF app bundle activation (8s)...")
                 time.sleep(8)
 
-                # Inject OSPF configuraton json via host
+                # Inject OSPF configuraton json via host. The file's
+                # interfaces[0].ipAddress is a placeholder - patched here to
+                # self.onos_ip so this works regardless of backend (Docker
+                # containers and K3s pods get IPs from different ranges).
                 config_path = os.path.abspath(os.path.join(current_dir, "..", "onos_apps", "ospf-config.json"))
                 if os.path.exists(config_path):
+                    with open(config_path) as f:
+                        ospf_config = json.load(f)
+                    interfaces = ospf_config["apps"]["org.onosproject.ospf"]["ospfappconfig"]["processes"][0]["areas"][0]["interfaces"]
+                    interfaces[0]["ipAddress"] = self.onos_ip
                     config_cmd = (
                         f'curl -u onos:rocks -X POST '
                         f'-H "Content-Type:application/json" '
                         f'"http://{self.onos_ip}:8181/onos/v1/network/configuration/" '
-                        f'-d "@{config_path}"'
+                        f"-d '{json.dumps(ospf_config)}'"
                     )
                     subprocess.run(config_cmd, shell=True)
                     print("[OK] OSPF Network Configuration applied!")
@@ -512,7 +520,10 @@ class DashTopology:
         print("\n[Experiment] ... Bridging ONOS and Quagga (for UI Discovery)")
         first_pop = self.config['pops'][0][0]
         gw_router = self.routers[first_pop]
-        ospf_onos = "router ospf\\n network 172.17.0.0/16 area 0.0.0.0\\n!"
+        # A /32 host route to ONOS's own IP, not the whole bridge/pod subnet -
+        # works the same way regardless of backend (Docker's docker0 range or
+        # K3s's flannel pod CIDR) without needing to know either one's prefix.
+        ospf_onos = f"router ospf\\n network {self.onos_ip}/32 area 0.0.0.0\\n!"
         gw_router.run(f"echo -e '{ospf_onos}' >> /etc/quagga/ospfd.conf")
 
         print("\n[Experiment] ... Starting Quagga daemons to apply configs")

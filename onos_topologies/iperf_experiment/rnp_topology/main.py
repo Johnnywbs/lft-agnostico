@@ -107,7 +107,6 @@ def main():
     utils.append_event(run_root, f"RUN_START {time.strftime('%Y%m%d-%H%M%S')}")
 
     try:
-        utils.cleanup()
 
         onos_tag = f"onosproject/onos:{mode_cfg['onos']}"
         topo = DashTopology(config=CONFIG_RNP, results_dir=project_root / "results", iperf=True, onos_version=onos_tag)

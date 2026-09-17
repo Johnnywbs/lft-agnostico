@@ -29,17 +29,16 @@ You need:
 
 ## 2. Installation & Image Build
 
-To install the project you need to run:
+On recent Ubuntu, the system Python blocks a plain `pip install` (PEP 668).
+Instead of `--break-system-packages`, install into a venv - no `sudo`
+needed for either step, since it's a normal venv, not a system-wide install:
 
 ```
-pip3 install profissa_lft
+python3 -m venv .venv
+.venv/bin/pip install profissa_lft
 ```
 
-Or clone the repository and install locally. On recent Ubuntu, the system
-Python blocks a plain `pip install` (PEP 668), so instead of
-`--break-system-packages`, install into a venv in the repo - no `sudo`
-needed for either step, since it's a normal per-project venv, not a
-system-wide install:
+Or clone the repository and install locally:
 
 ```
 git clone https://github.com/alexandrekaihara/lft
